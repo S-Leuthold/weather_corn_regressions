@@ -1,0 +1,317 @@
+---
+title: "Weather and Corn Yield Regressions"
+author: "Sam Leuthold"
+date: "3/06/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(R.matlab)
+library(rnassqs)
+```
+
+## Setup
+
+```{r Setup, message = F, results='hide'}
+
+prism <- readMat("./prismiowa.mat")
+
+dimnames(prism$tmaxdaily.iowa) <- list(prism$COUNTYFP, 1:366, prism$years)
+
+tmaxdf <- as.data.frame.table(prism$tmaxdaily.iowa)
+
+colnames(tmaxdf) <- c("countyfp","doy","year","tmax")
+
+tmaxdf <- tibble(tmaxdf)
+
+tmaxdf$doy <- as.numeric(tmaxdf$doy)
+
+tmaxdf$year <- as.numeric(as.character(tmaxdf$year))
+
+winnesummer <- tmaxdf %>%
+                filter(countyfp==191 & doy >= 152 & doy <= 243) %>%
+                group_by(year) %>%
+                summarize(meantmax = mean(tmax))
+
+winnewinter <- tmaxdf %>%
+                filter(countyfp==191 & (doy <= 59 | doy >= 335) & !is.na(tmax)) %>%
+                group_by(year) %>%
+                summarize(meantmax = mean(tmax))
+
+nassqs_auth(key = "11FCF4DC-1B74-3577-B8A5-5F09B27E2390")
+
+params <- list(commodity_desc = "CORN", 
+               util_practice_desc = "GRAIN", 
+               prodn_practice_desc = "ALL PRODUCTION PRACTICES", 
+               year__GE = 1981, 
+               state_alpha = "IA")
+
+
+cornyieldsall <- nassqs_yields(params)
+
+cornyieldsall$county_ansi <- as.numeric(cornyieldsall$county_ansi)
+
+cornyieldsall$yield <- as.numeric(cornyieldsall$Value)
+
+cornyields <- select(cornyieldsall, county_ansi, county_name, yield, year) %>%
+                filter(!is.na(county_ansi) & !is.na(yield))
+
+cornyields <- tibble(cornyields)
+
+```
+
+## Assignment
+
+### Question 1a: Extract Winneshiek County corn yields, fit a linear time trend, make a plot. Is there a significant time trend?
+
+```{r}
+
+winneshiek <- cornyields %>%
+                filter(county_name == "WINNESHIEK")
+
+
+winneshiek.lm <- lm(yield ~ year, 
+                    data = winneshiek)
+
+summary(winneshiek.lm)
+
+winneshiek$fitted.yield.lm <- winneshiek.lm$fitted.values
+
+
+ggplot(winneshiek) +
+  geom_point(aes(x = year,
+                 y = yield)) +
+  geom_line(aes(x = year, 
+                y = fitted.yield.lm),
+            lty = 2) +
+  ylab(expression("Yield (bu"~acre^-1*")")) +
+  xlab("Year") +
+  theme_minimal()
+
+```
+
+There is a significant time trend (p-value < 0.001). Year explains ~75% of the variability in the yield data. While there are some obvious outliers (e.g., 1993), maize yield tend to increase overtime by a rate of ~2.5 bushels per acre per year. 
+
+### Question 1b: Fit a quadratic time trend (i.e., year + year^2) and make a plot. Is there evidence for slowing yield growth? 
+
+``` {r}
+
+winneshiek <- winneshiek %>%
+                mutate(year_2 = year^2)
+
+winneshiek.qm <- lm(yield ~ year + year_2,
+                    data = winneshiek)
+
+summary(winneshiek.qm)
+anova(winneshiek.qm)
+
+winneshiek$fitted.yield.qm <- winneshiek.qm$fitted.values
+
+ggplot(winneshiek) +
+  geom_point(aes(x = year,
+                 y = yield)) +
+  geom_line(aes(x = year, 
+                y = fitted.yield.qm),
+            lty = 2) +
+  ylab(expression("Yield (bu"~acre^-1*")")) +
+  xlab("Year") +
+  theme_minimal()
+
+```
+
+In Winnesheiek county, there is no evidence of slowing yield growth for corn. The quadratic parameter is not significant, and does not add explanatory power to the model. If anything, there has been an insignificant but noticible increase in the rate of yield growth in the decade since 2010, implying that yield growth might be increasing. 
+
+### Question 2 -- Time Series: Let's analyze the relationship between temperature and yields for the Winneshiek County time series. Use data on yield and summer avg Tmax. Is adding year or Tmax^2 to your model helpful? Make a plot and interpret the results.
+
+``` {r}
+
+winneshiek.climate <- cornyields %>%
+                      filter(county_name == "WINNESHIEK") %>%
+                      right_join(., 
+                                  winnesummer, 
+                                  by = "year")
+
+### Linear model
+
+winneshiek.climate.lm <- lm(yield ~ meantmax,
+                             data = winneshiek.climate)
+
+summary(winneshiek.climate.lm)
+
+fitted.values.lm <- winneshiek.climate.lm$fitted.values
+
+### Multiple regression
+
+winneshiek.climate.mlm <- lm(yield ~ meantmax + year,
+                             data = winneshiek.climate)
+
+summary(winneshiek.climate.mlm)
+
+fitted.values.mlm <- predict(winneshiek.climate.mlm,
+                             newdata = data.frame(meantmax = winneshiek.climate$meantmax,
+                                                  year = winneshiek.climate$year))
+
+
+### Quadratic multiple regression
+
+winneshiek.climate <- winneshiek.climate %>%
+                        mutate(tmax_2 = meantmax^2)
+
+winneshiek.climate.mqm <- lm(yield ~ meantmax + tmax_2,
+                             data = winneshiek.climate)
+
+summary(winneshiek.climate.mqm)
+
+fitted.values.mqm <- winneshiek.climate.mqm$fitted.values
+
+###
+
+model.comparison <- tibble(Model = c(rep("Yield ~ Max Temperature", length = 38),
+                                     rep("Yield ~ Year + Max Temperature", length = 38),
+                                     rep("Yield ~ Max Temperature + Max Temperature^2", length = 38)),
+                           T_Max = rep(winneshiek.climate$meantmax, 3),
+                           Fitted = c(fitted.values.lm,
+                                      fitted.values.mlm,
+                                      fitted.values.mqm))
+
+###
+
+ggplot(data = winneshiek.climate,
+       aes(x = meantmax,
+           y = yield)) +
+  geom_point() +
+  geom_line(data = model.comparison,
+            aes(x = T_Max,
+                y = Fitted, 
+                color = Model)) +
+  ylab(expression("Yield (bu"~acre^-1*")")) +
+  xlab("Max Temperature (C)") +
+  theme_minimal() +
+  theme(legend.position = c(0.8,0.9))
+
+
+```
+There is a significant negative, nonlinear relationship between maximum annual temperature and average yield in Winnesheik county. This trend is best captured by the quadratic mode, which shows that yields rise to a maxima at ~27 degrees C, after which they begin to fall. Further analysis should investigate the interaction between the month during which max temperature was observed and max temerature, as corn growth stage response to temperature may confound results. 
+
+Adding year to the model helps to explain some of the variance, but results are significant in either case. Adding yead as a random effect in a mixed model in future analyses may provide even more robust results. 
+
+
+### Question 3 -- Cross-Section: Analyze the relationship between temperature and yield across all counties in 2018. Is there a relationship? Interpret the results.
+
+``` {r Question 3}
+
+
+climate.yield.data <- tmaxdf %>%
+                        filter(doy %in% seq(152, 243)) %>%
+                        group_by(countyfp,
+                                 year) %>%
+                        summarise(Max_Temp = mean(tmax, na.rm = T)) %>%
+                        mutate(Max_Temp2 = Max_Temp^2)  %>%
+                        mutate(countyfp = as.numeric(as.character((countyfp)))) %>%
+                        left_join(x = .,
+                                  y = cornyields,
+                                  by = c("year", 
+                                         "countyfp" = "county_ansi")) %>%
+                        filter(is.na(yield) == F)
+                        
+
+state.level.lm <- lm(yield ~ Max_Temp + Max_Temp2, data = climate.yield.data)
+
+climate.yield.data$Fitted <- state.level.lm$fitted.values
+
+summary(state.level.lm)
+
+anova(state.level.lm)
+
+ggplot(data = climate.yield.data,
+       aes(x = Max_Temp,
+           y = yield)) +
+       geom_point() +
+       geom_line(aes(x = Max_Temp,
+                     y = Fitted),
+                 color = "red",
+                 lty = 2,
+                 size = 1.5) +
+  ylab(expression("Yield (bu"~acre^-1*")")) +
+  xlab("Maximum Temperature (C)") +
+  theme_minimal()
+
+
+
+```
+
+Yes, there is a significant relationship between maximum temperature and corn yields analyzed across all IA counties. When evaluated using a linear predictor, yields decline by ~ 9 bushels per acre per 1 degree increase in max temperature. However, yields decline more rapidly at higher temperatures, and as such a quadratic model is more appropriate for analyzing these data. The variability in yield (likely a function of variability in soil properties, management, and precipitation) lead to the model explaining only 19% of the variability, however the model shows significance for both the maximum temperature term, as well as the quadratic term. 
+
+### Question 4 -- Panel: One way to leverage multiple time series is to group all data into what is called a "panel" regression. Convert the county ID code ("countyfp" or "county_ansi") into factor using as.factor, then include this variable in a regression using all counties' yield and summer temperature data. How does the significance of your temperature coefficients (Tmax, Tmax^2) change? Make a plot comparing actual and fitted yields and interpret the results of your model.
+
+``` {r}
+
+climate.yield.data <- climate.yield.data %>%
+                        mutate(county_name = as.factor(county_name))
+
+panel.lm <- lm(yield ~ Max_Temp + Max_Temp2 + county_name, data = climate.yield.data)
+
+summary(panel.lm)
+
+climate.yield.data$fitted <- panel.lm$fitted.values
+
+
+ggplot(data = climate.yield.data,
+       aes(y = fitted,
+           x = yield)) +
+  geom_point() +
+  xlab(expression("Measured Yield (bu"~acre^-1*")")) +
+  ylab(expression("Fitted Yield (bu"~acre^-1*")")) +
+  theme_minimal() 
+
+
+```
+In the panel regression, temperature coefficents are highly significant (p-value < 0.001). Including county as a factor increase the amount of variability explained by the model, and gives insight into counties where this trend is most significant. Interestingly, modeled yields tend to find a maximum at ~ 165 bu per acre, limiting the ability of the model to capture variability in high yielding counties. 
+
+### Question 5 -- Soybeans: Download NASS data on soybean yields and explore either a time series relationship for a given county, the cross-sectional relationship for a given year, or a panel across all counties and years.
+
+``` {r, message = F, results='hide'}
+soybean.params <- list(commodity_desc = "SOYBEANS", 
+                       prodn_practice_desc = "ALL PRODUCTION PRACTICES",
+                       year__GE = 1965, 
+                       state_alpha = "IA")
+
+soybean.yields <- nassqs_yields(soybean.params)
+
+```
+
+
+``` {r}
+soybean.yields <- soybean.yields %>%
+                  mutate(Yield = as.numeric(Value)) %>%
+                  mutate(county_ansi = as.numeric(county_ansi)) %>%
+                  select(county_ansi, county_name, Yield, year) %>%
+                  filter(!is.na(county_ansi) & !is.na(Yield)) %>%
+                  mutate(county_name = as.factor(county_name)) %>%
+                  tibble(.) %>%
+                  mutate(yearsq = year^2)
+
+
+
+desmoines.lm.a <- lm(Yield ~ year + yearsq, data = soybean.yields[soybean.yields$county_name == "DES MOINES",])
+desmoines.lm.b <- lm(Yield ~ year, data = soybean.yields[soybean.yields$county_name == "DES MOINES",])
+
+summary(desmoines.lm.a)
+summary(desmoines.lm.b)
+
+
+
+ggplot(data = soybean.yields[soybean.yields$county_name == "DES MOINES",],
+       aes(x = year,
+           y = Yield)) +
+  geom_point() +
+  ylab(expression("Yield (bu"~acre^-1*")")) +
+  xlab("Year") +
+  theme_minimal()
+```
+I thought it could be interesting to see if increases in technology accelerated the yield growth of soybeans in Des Moines county if we looked further back in time. The models show that this is not the case; similar to the first question, yield growth is linear for soybeans in Des Moines county. A linear model performs better than the quadratic. Part of this could be the prevelance of continous corn in the Des Moines lobe region, but it's hard to tell without further data. 
+
